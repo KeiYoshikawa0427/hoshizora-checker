@@ -1,11 +1,9 @@
-name: HoshizoraChecker Daily Run
+name: HoshizoraChecker Hourly Run
 
 on:
   schedule:
-    # JST 08:00（= UTC 23:00 前日）
-    - cron: '0 23 * * *'
-    # JST 20:00（= UTC 11:00 当日）
-    - cron: '0 11 * * *'
+    # JST基準で毎時ちょうどに実行（UTCで毎時-9時間）
+    - cron: '0 * * * *'   # every hour
   workflow_dispatch:
 
 jobs:
@@ -26,4 +24,5 @@ jobs:
 
       - name: Run script
         run: |
+          echo "Running HoshizoraChecker at $(date -u)"
           python HoshizoraChecker-Sagamihara.py
