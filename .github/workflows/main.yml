@@ -1,0 +1,27 @@
+name: HoshizoraChecker Daily Run
+
+on:
+  schedule:
+    # JST 08:00 = UTC 23:00
+    - cron: '0 23 * * *'
+  workflow_dispatch:
+
+jobs:
+  run-hoshizora:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          pip install requests beautifulsoup4 lxml
+
+      - name: Run script
+        run: |
+          python HoshizoraChecker-Sagamihara.py
