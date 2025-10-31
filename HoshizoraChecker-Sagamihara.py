@@ -9,7 +9,7 @@ NTFY_TOPIC = "HoshizoraChecker-Sagamihara"
 STARRY_URL = "https://tenki.jp/indexes/starry_sky/3/17/4620/14150/"
 FORECAST_URL = "https://tenki.jp/forecast/3/17/4620/14150/"
 
-# 相模原あたりの緯度経度（ざっくりでOK）
+# 相模原あたりの緯度経度（ざっくり）
 LAT = 35.5714
 LON = 139.3733
 
@@ -21,6 +21,7 @@ WINDOW_MIN = 5
 
 
 def _make_soup(html: str) -> BeautifulSoup:
+    """lxmlがあればlxmlで、なければ標準parserでパースする"""
     try:
         return BeautifulSoup(html, "lxml")
     except Exception:
@@ -28,6 +29,7 @@ def _make_soup(html: str) -> BeautifulSoup:
 
 
 def calc_moon_age(date: datetime.date) -> float:
+    """簡易月齢計算（通知用途）"""
     base = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
     dt_utc = datetime(date.year, date.month, date.day, tzinfo=timezone.utc)
     days = (dt_utc - base).total_seconds() / 86400.0
@@ -36,9 +38,7 @@ def calc_moon_age(date: datetime.date) -> float:
 
 
 def fetch_sunset_jst() -> datetime:
-    """
-    Sunrise-Sunset APIから今日の日没を取得してJSTに変換して返す。
-    """
+    """Sunrise-Sunset APIから今日の日没を取得（JSTに変換）"""
     url = f"https://api.sunrise-sunset.org/json?lat={LAT}&lng={LON}&formatted=0"
     r = requests.get(url, timeout=10)
     r.raise_for_status()
@@ -50,10 +50,7 @@ def fetch_sunset_jst() -> datetime:
 
 
 def fetch_starry_today_tomorrow():
-    """
-    星空指数ページから「指数:XX」を持つimgを上から2つ取って
-    1つ目を【今日】、2つ目を【明日】にする
-    """
+    """星空指数ページから「指数:XX」を持つimgを上から2つとる"""
     r = requests.get(STARRY_URL, timeout=10)
     r.raise_for_status()
     soup = _make_soup(r.text)
@@ -66,7 +63,7 @@ def fetch_starry_today_tomorrow():
         alt = img.get("alt", "")
         index_val = alt.split("指数:")[-1].strip() if "指数:" in alt else "?"
 
-        # コメントを親からたどってとる
+        # コメントを親からさかのぼって探す
         comment = ""
         parent = img.parent
         for _ in range(5):
@@ -88,6 +85,7 @@ def fetch_starry_today_tomorrow():
             if label == "今日"
             else (today_date + timedelta(days=1)).strftime("%Y-%m-%d (%a)")
         )
+
         entries.append(
             {
                 "date": date_str,
@@ -101,6 +99,7 @@ def fetch_starry_today_tomorrow():
 
 
 def _extract_first_percent(block) -> str:
+    """block内から最初の「xx%」を探す"""
     for tag in block.find_all(["td", "span", "p", "div", "li"]):
         txt = tag.get_text(strip=True)
         if txt.endswith("%") and txt[:-1].isdigit():
@@ -109,10 +108,7 @@ def _extract_first_percent(block) -> str:
 
 
 def fetch_rain_today_tomorrow():
-    """
-    forecastページから「今日」「明日」のところだけ見て降水をとる。
-    周辺市は無視。
-    """
+    """forecastページから「今日」「明日」の降水だけとる"""
     r = requests.get(FORECAST_URL, timeout=10)
     r.raise_for_status()
     soup = _make_soup(r.text)
@@ -143,12 +139,12 @@ def should_send(now_jst: datetime, sunset_jst: datetime) -> bool:
     1) 朝7:00 ± WINDOW_MIN 分なら送信
     2) 日没1時間前 ± WINDOW_MIN 分なら送信
     """
-    # 1) 朝7:00判定
+    # 1) 朝7:00
     target_morning = now_jst.replace(hour=7, minute=0, second=0, microsecond=0)
     if abs((now_jst - target_morning).total_seconds()) <= WINDOW_MIN * 60:
         return True
 
-    # 2) 日没1時間前判定
+    # 2) 日没1時間前
     target_before_sunset = sunset_jst - timedelta(hours=1)
     if abs((now_jst - target_before_sunset).total_seconds()) <= WINDOW_MIN * 60:
         return True
@@ -157,7 +153,7 @@ def should_send(now_jst: datetime, sunset_jst: datetime) -> bool:
 
 
 def build_message(sunset_jst: datetime) -> str:
-    """最終的に送るテキストを組み立てる"""
+    """送信するテキストを作る"""
     today = datetime.now(JST).date()
     moon_age = calc_moon_age(today)
 
@@ -170,7 +166,7 @@ def build_message(sunset_jst: datetime) -> str:
     else:
         star_err = ""
 
-    # 降水確率
+    # 降水
     try:
         today_rain, tomorrow_rain = fetch_rain_today_tomorrow()
     except Exception as e:
@@ -184,7 +180,7 @@ def build_message(sunset_jst: datetime) -> str:
     lines.append("🌌 相模原の天体観測情報（自動）")
     lines.append(f"📅 {today.strftime('%Y-%m-%d (%a)')}")
     lines.append(f"🌙 月齢: {moon_age:.1f}日")
-    # ←ここで改行しない
+    # ここで空行なしで続ける
 
     if star_rows:
         for r in star_rows:
@@ -200,7 +196,7 @@ def build_message(sunset_jst: datetime) -> str:
         lines.append("【今日】 データ取得失敗（星空指数）")
         lines.append("【明日】 データ取得失敗（星空指数）")
 
-    # ←ここで日没時刻を明日ブロックの下に表示
+    # 日没時間を明日の下に表示
     lines.append(f"🕗 今日の日没（相模原）: {sunset_jst.strftime('%H:%M')}")
 
     lines.append("")
@@ -226,9 +222,20 @@ def send_ntfy(text: str):
 
 def main():
     now_jst = datetime.now(JST)
+    # 毎回日没を取りに行く
     sunset_jst = fetch_sunset_jst()
 
-    # 送るかどうか判定
+    # 送信するべき時間かどうか判定
     if not should_send(now_jst, sunset_jst):
-        # GitHub Actionsのログ用に出すだけ
-        print(f"[{now_jst
+        # GitHub Actionsのログにだけ出して終わる
+        print(f"[{now_jst.strftime('%Y-%m-%d %H:%M:%S')}] skip: not in send window")
+        return
+
+    # ここに来たら送信
+    msg = build_message(sunset_jst)
+    print(msg)  # ログにも出す
+    send_ntfy(msg)
+
+
+if __name__ == "__main__":
+    main()
