@@ -112,12 +112,12 @@ def fetch_rain_today_tomorrow():
     return today_prob, tomorrow_prob
 
 # ==============================
-# 雲量（全角時間＋全角％＋半角ブロック█20個）
+# 雲量（全角時間＋全角％＋半角ブロック▮20個）
 # ==============================
 def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> str:
     """
-    １７時（１００％）: ████████████████████
-    １８時（　５０％）: ██████████
+    １７時（１００％）: ▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮
+    １８時（　５０％）: ▮▮▮▮▮▮▮▮▮▮
     １９時（　　０％）:
     """
     r = requests.get(CLOUD_URL, timeout=10)
@@ -136,7 +136,8 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
         dt = datetime.fromisoformat(t).replace(tzinfo=JST)
         if sunset_jst <= dt <= sunrise_next_jst:
             bar_len = int(c / 100 * MAX_BAR)
-            bar = "█" * bar_len
+            # ▮（U+25AE）を使用：iOSで全角化されないブロック
+            bar = "▮" * bar_len + " "
             hour_zen = f"{dt.hour:02d}".translate(to_zen)
             pct = f"{c:3d}%".translate(to_zen)
             line = f"{hour_zen}時（{pct}）: {bar}"
