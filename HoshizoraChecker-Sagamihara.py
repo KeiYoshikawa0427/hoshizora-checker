@@ -16,7 +16,7 @@ SLOT_MIN = 15
 LAST_FILE = ".last_sent"
 
 # デバッグ用（Trueにすると手動起動で強制送信できる）
-DEBUG_FORCE_NOTIFY = False
+DEBUG_FORCE_NOTIFY = True
 # =========================================================
 
 
@@ -233,3 +233,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
