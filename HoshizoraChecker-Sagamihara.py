@@ -17,7 +17,7 @@ CLOUD_URL = (
 )
 JST = timezone(timedelta(hours=9))
 LAST_FILE = ".last_sent"
-DEBUG_FORCE_NOTIFY = True  # 手動実行で通知させたいときは True
+DEBUG_FORCE_NOTIFY = True  # 手動実行時に必ず通知したいときは True
 
 # =========================================================
 # 共通関数
@@ -112,9 +112,10 @@ def fetch_rain_today_tomorrow():
     return today_prob, tomorrow_prob
 
 # =========================================================
-# 雲量（スマホ対応・数値そろえ）
+# 雲量（全角そろえ）
 # =========================================================
 def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> str:
+    """ntfy(iPhone)でずれにくいよう、全角でそろえる版"""
     r = requests.get(CLOUD_URL, timeout=10)
     r.raise_for_status()
     data = r.json()
@@ -123,20 +124,24 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
     covers = data["hourly"]["cloudcover"]
 
     lines = []
-    MAX_BAR = 30  # 折り返しにくい長さ
+    MAX_BAR = 15  # 全角15マス → だいたい半角30マス相当
+
+    def to_zenkaku_percent(num: int) -> str:
+        # "  0%" → "　０％" みたいに全角化して4文字そろえ
+        half = f"{num:3d}%"
+        table = str.maketrans(" 0123456789%", "　０１２３４５６７８９％")
+        return half.translate(table)
 
     for t, c in zip(times, covers):
-        # Open-MeteoはtzなしなのでJSTを明示
         dt = datetime.fromisoformat(t).replace(tzinfo=JST)
         if sunset_jst <= dt <= sunrise_next_jst:
-            # 0〜100% → 0〜30文字
             bar_len = int(c / 100 * MAX_BAR)
-            bar = "#" * bar_len
-            # 数値を3桁で右寄せ →  "  0%" " 25%" "100%"
-            val = f"{c:3d}%"
-            # 例: "17時 |##########                   25%"
-            line = f"{dt.hour:02d}時 |{bar:<{MAX_BAR}} {val}"
-            lines.append(line.rstrip())
+            bar = "■" * bar_len
+            pad = "　" * (MAX_BAR - bar_len)  # 全角スペースで埋める
+            val = to_zenkaku_percent(c)       # ４文字固定の全角％
+            # 例: "17時 │■■■■■　　　　１００％"
+            line = f"{dt.hour:02d}時 │{bar}{pad} {val}"
+            lines.append(line)
 
     return "\n".join(lines) if lines else "データなし"
 
@@ -144,11 +149,10 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
 # 通知制御
 # =========================================================
 def should_send(now_jst: datetime, sunset_jst: datetime) -> bool:
-    # 朝の枠
+    # 朝の枠（06:30〜07:29）
     if (now_jst.hour == 6 and now_jst.minute >= 30) or (now_jst.hour == 7 and now_jst.minute < 30):
         return True
-
-    # 日没1時間前の30分ブロック
+    # 日没1時間前を30分に切り下げたブロックで送る
     target = floor_to_30(sunset_jst - timedelta(hours=1))
     now_block = floor_to_30(now_jst)
     return now_jst < sunset_jst and now_block == target
@@ -162,7 +166,6 @@ def build_message(sunset_jst: datetime) -> str:
     sunrise_next = fetch_sunrise_jst(for_tomorrow=True)
     cloud_text = fetch_night_cloudcover(sunset_jst, sunrise_next)
 
-    # 星空・降水
     try:
         star_rows = fetch_starry_today_tomorrow()
         star_err = ""
@@ -191,7 +194,7 @@ def build_message(sunset_jst: datetime) -> str:
     else:
         lines += ["【今日】星空指数取得失敗", "【明日】星空指数取得失敗"]
 
-    # ←ここに月齢を移動
+    # 月齢はここ
     lines.append(f"🌙 月齢: {moon_age:.1f}日")
 
     # 日没・日の出
@@ -199,12 +202,12 @@ def build_message(sunset_jst: datetime) -> str:
     lines.append(f"🌅 明日の日の出（相模原）: {sunrise_next.strftime('%H:%M')}")
     lines.append("")
 
-    # 雲量グラフ
+    # 雲量
     lines.append(f"☁️ 夜間雲量予報（{sunset_jst.strftime('%H:%M')}〜{sunrise_next.strftime('%H:%M')}）")
     lines.append(cloud_text)
     lines.append("")
 
-    # リンク群
+    # リンク
     lines.append(f"🔗 星空指数: {STARRY_URL}")
     lines.append(f"🔗 天気: {FORECAST_URL}")
     lines.append(f"🔗 雲量(元データ): {CLOUD_URL}")
@@ -239,7 +242,7 @@ def main():
     event_name = os.getenv("GITHUB_EVENT_NAME", "")
     is_manual = event_name == "workflow_dispatch"
 
-    # 手動起動なら強制で送る
+    # 手動実行なら常に送る
     if DEBUG_FORCE_NOTIFY and is_manual:
         msg = build_message(sunset_jst)
         send_ntfy(msg)
@@ -247,11 +250,12 @@ def main():
         print("[DEBUG] Manual run: notification sent")
         return
 
-    # スケジュール起動時の判定
+    # 自動実行時の判定
     if not should_send(now_jst, sunset_jst):
         print(f"[{now_jst}] skip: not in window")
         return
 
+    # 同じ日の同じブロックでは送らない
     target_block = floor_to_30(sunset_jst - timedelta(hours=1))
     block_label = f"{now_jst.date()}_{target_block.strftime('%H%M')}"
     if already_sent_today(block_label):
