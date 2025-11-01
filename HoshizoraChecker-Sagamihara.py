@@ -112,14 +112,14 @@ def fetch_rain_today_tomorrow():
     return today_prob, tomorrow_prob
 
 # =========================================================
-# 雲量（時間→％→バー の順）
+# 雲量（全角固定幅: 時間と％を全角で統一）
 # =========================================================
 def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> str:
     """
     例:
-    17時 (100%): ####################
-    18時 ( 25%): ####
-    19時 (  0%):
+    １７時（１００％）: ####################
+    １８時（　２５％）: ######
+    １９時（　　０％）:
     """
     r = requests.get(CLOUD_URL, timeout=10)
     r.raise_for_status()
@@ -129,17 +129,20 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
     covers = data["hourly"]["cloudcover"]
 
     lines = []
-    MAX_BAR = 22  # これくらいならスマホでも折れにくい
+    MAX_BAR = 20  # 棒の最大長
+
+    # 半角→全角変換テーブル
+    to_zen = str.maketrans("0123456789%() ", "０１２３４５６７８９％（）　")
 
     for t, c in zip(times, covers):
         dt = datetime.fromisoformat(t).replace(tzinfo=JST)
         if sunset_jst <= dt <= sunrise_next_jst:
-            # 0〜100% → 0〜MAX_BAR
             bar_len = int(c / 100 * MAX_BAR)
-            bar = "#" * bar_len
-            # %を4文字にそろえる: "  0%", " 25%", "100%"
-            pct = f"{c:3d}%"
-            line = f"{dt.hour:02d}時 ({pct}): {bar}"
+            bar = "■" * bar_len
+            # 全角化した時間・パーセント
+            hour_zen = f"{dt.hour:02d}".translate(to_zen)
+            pct = f"{c:3d}%".translate(to_zen)
+            line = f"{hour_zen}時（{pct}）: {bar}"
             lines.append(line.rstrip())
 
     return "\n".join(lines) if lines else "データなし"
@@ -148,7 +151,7 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
 # 通知制御
 # =========================================================
 def should_send(now_jst: datetime, sunset_jst: datetime) -> bool:
-    # 朝の窓 (06:30〜07:29)
+    # 朝7時帯
     if (now_jst.hour == 6 and now_jst.minute >= 30) or (now_jst.hour == 7 and now_jst.minute < 30):
         return True
     # 日没1時間前を30分に切り下げ
@@ -194,31 +197,16 @@ def build_message(sunset_jst: datetime) -> str:
     else:
         lines += ["【今日】星空指数取得失敗", "【明日】星空指数取得失敗"]
 
-    # 月齢はここ
     lines.append(f"🌙 月齢: {moon_age:.1f}日")
-
-    # 日没・日の出
     lines.append(f"🕗 今日の日没（相模原）: {sunset_jst.strftime('%H:%M')}")
     lines.append(f"🌅 明日の日の出（相模原）: {sunrise_next.strftime('%H:%M')}")
     lines.append("")
-
-    # 雲量
     lines.append(f"☁️ 夜間雲量予報（{sunset_jst.strftime('%H:%M')}〜{sunrise_next.strftime('%H:%M')}）")
     lines.append(cloud_text)
     lines.append("")
-
-    # リンク
     lines.append(f"🔗 星空指数: {STARRY_URL}")
     lines.append(f"🔗 天気: {FORECAST_URL}")
     lines.append(f"🔗 雲量(元データ): {CLOUD_URL}")
-
-    if star_err or rain_err:
-        lines.append("")
-        lines.append("⚠ 取得エラー:")
-        if star_err:
-            lines.append(f"- 星空指数: {star_err}")
-        if rain_err:
-            lines.append(f"- 降水: {rain_err}")
 
     return "\n".join(lines)
 
@@ -242,7 +230,6 @@ def main():
     event_name = os.getenv("GITHUB_EVENT_NAME", "")
     is_manual = event_name == "workflow_dispatch"
 
-    # 手動実行なら常に送る
     if DEBUG_FORCE_NOTIFY and is_manual:
         msg = build_message(sunset_jst)
         send_ntfy(msg)
@@ -250,12 +237,10 @@ def main():
         print("[DEBUG] Manual run: notification sent")
         return
 
-    # 自動実行時の判定
     if not should_send(now_jst, sunset_jst):
         print(f"[{now_jst}] skip: not in window")
         return
 
-    # 同じ日の同じブロックでは送らない
     target_block = floor_to_30(sunset_jst - timedelta(hours=1))
     block_label = f"{now_jst.date()}_{target_block.strftime('%H%M')}"
     if already_sent_today(block_label):
