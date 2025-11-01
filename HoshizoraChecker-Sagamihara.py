@@ -8,7 +8,9 @@ from datetime import datetime, timedelta, timezone
 # ==============================
 NTFY_TOPIC = "HoshizoraChecker-Sagamihara"
 JST = timezone(timedelta(hours=9))
-DEBUG_FORCE_NOTIFY = True  # ← 手動実行(workflow_dispatch)なら必ず送る
+
+# 手動実行（workflow_dispatch）のときに必ず通知を送るかどうか
+DEBUG_FORCE_NOTIFY = True  # ←テスト中は True、本番は False に
 
 # tenki.jp (相模原)
 TENKI_URL_STAR = "https://tenki.jp/indexes/starry_sky/3/17/4620/14150/"
@@ -26,38 +28,63 @@ OPEN_METEO_URL = (
 )
 
 # ==============================
-# 星空指数・天気・降水確率
+# 1. 星空指数（元に戻した版）
 # ==============================
 def fetch_starry_data():
-    r = requests.get(TENKI_URL_STAR, timeout=10)
-    soup = BeautifulSoup(r.text, "html.parser")
-    days = soup.select(".index-table-day")
-    data = []
-    for d in days[:2]:
-        idx = d.select_one(".index-point-telop").text.strip().replace("指数", "")
-        wth = d.select_one(".weather-telop").text.strip()
-        data.append((idx, wth))
-    # 念のため2つにそろえる
-    while len(data) < 2:
-        data.append(("?", ""))
-    return data
+    """tenki.jpの「星空指数」ページから今日・明日ぶんを取る"""
+    res = requests.get(TENKI_URL_STAR, timeout=10)
+    soup = BeautifulSoup(res.text, "html.parser")
 
-def fetch_weather_data():
-    r = requests.get(TENKI_URL_WEATHER, timeout=10)
-    soup = BeautifulSoup(r.text, "html.parser")
-    rain_cells = soup.select(".rain-probability td")
-    # 今日・明日の2つだけ取る。なければ "?"
-    rains = [c.text.strip() for c in rain_cells[:2]]
-    while len(rains) < 2:
-        rains.append("?")
-    return rains
+    days = soup.select(".index-table-day")
+    result = []
+    for d in days[:2]:
+        # 以前うまく出ていたセレクタに戻す
+        idx_el = d.select_one(".index-point-telop")
+        wx_el = d.select_one(".weather-telop")
+        if idx_el:
+            idx = idx_el.text.strip().replace("指数", "").replace(":", "")
+        else:
+            idx = "?"
+        if wx_el:
+            wx = wx_el.text.strip()
+        else:
+            wx = ""
+        result.append((idx, wx))
+
+    # 念のため2件にそろえる
+    while len(result) < 2:
+        result.append(("?", ""))
+
+    return result  # [(今日指数, 今日コメント), (明日指数, 明日コメント)]
 
 # ==============================
-# 日没・日の出（JST付きにする）
+# 2. 降水確率（シンプル版に戻す）
+# ==============================
+def fetch_weather_data():
+    """tenki.jpの相模原の天気ページから、降水確率を上から2つだけ取る"""
+    res = requests.get(TENKI_URL_WEATHER, timeout=10)
+    soup = BeautifulSoup(res.text, "html.parser")
+
+    cells = soup.select(".rain-probability td")
+    rains = [c.text.strip() for c in cells[:2]]
+
+    # 値がないとき '---' が来ることがあるので最低限の補正
+    fixed = []
+    for r in rains:
+        if not r or r == "---":
+            fixed.append("?")
+        else:
+            fixed.append(r)
+    while len(fixed) < 2:
+        fixed.append("?")
+    return fixed  # [今日降水, 明日降水]
+
+# ==============================
+# 3. 日没・翌日の日の出（JST付き）
 # ==============================
 def fetch_sun_times():
-    r = requests.get(OPEN_METEO_URL, timeout=10)
-    data = r.json()
+    res = requests.get(OPEN_METEO_URL, timeout=10)
+    data = res.json()
     daily = data.get("daily", {})
     sunset_str = daily["sunset"][0]
     sunrise_next_str = daily["sunrise"][1]
@@ -66,32 +93,34 @@ def fetch_sun_times():
     return sunset, sunrise_next
 
 # ==============================
-# 月齢
+# 4. 月齢（簡易）
 # ==============================
 def calc_moon_age(date=None):
     if date is None:
         date = datetime.now(JST)
     base = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
-    diff = (date.astimezone(timezone.utc) - base).total_seconds() / 86400
-    return round(diff % 29.53058867, 1)
+    diff_days = (date.astimezone(timezone.utc) - base).total_seconds() / 86400.0
+    synodic_month = 29.53058867
+    return round(diff_days % synodic_month, 1)
 
 # ==============================
-# 雲量データ取得
+# 5. 夜間の雲量を取得（sunset〜sunrise_next）
 # ==============================
 def fetch_night_cloudcover(sunset_jst, sunrise_next_jst):
-    r = requests.get(OPEN_METEO_URL, timeout=10)
-    data = r.json()
+    res = requests.get(OPEN_METEO_URL, timeout=10)
+    data = res.json()
     times = data["hourly"]["time"]
     covers = data["hourly"]["cloudcover"]
+
     result = []
-    for t, c in zip(times, covers):
-        dt = datetime.fromisoformat(t).replace(tzinfo=JST)
+    for t_str, c in zip(times, covers):
+        dt = datetime.fromisoformat(t_str).replace(tzinfo=JST)
         if sunset_jst <= dt <= sunrise_next_jst:
             result.append((dt, int(c)))
-    return result
+    return result  # [(dt(JST), cloud%), ...]
 
 # ==============================
-# 雲量グラフ生成（全角揃え）
+# 6. 雲量グラフ（全角でそろえるやつ）
 # ==============================
 def build_cloud_graph(cloud_data):
     lines = []
@@ -112,23 +141,16 @@ def build_cloud_graph(cloud_data):
         pct_zen = pad_percent(c)
         bar = "▮" * int(c / 100 * MAX_BAR)
         lines.append(f"{hour_zen}時（{pct_zen}）: {bar}")
-    return "\n".join(lines)
+
+    return "\n".join(lines) if lines else "データなし"
 
 # ==============================
-# 通知送信
-# ==============================
-def send_ntfy(msg: str):
-    r = requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=msg.encode("utf-8"), timeout=10)
-    r.raise_for_status()
-
-# ==============================
-# 通知本文生成（同じ通知内にテストを入れる）
+# 7. 通知本文の組み立て（テスト行なし）
 # ==============================
 def build_message(sunset_jst):
     now = datetime.now(JST)
-    starry_data = fetch_starry_data()
-    rain_data = fetch_weather_data()
-    # 日の出はここで再取得しても軽いので素直に取る
+    starry = fetch_starry_data()
+    rains = fetch_weather_data()
     _, sunrise_next = fetch_sun_times()
     cloud_data = fetch_night_cloudcover(sunset_jst, sunrise_next)
     cloud_text = build_cloud_graph(cloud_data)
@@ -137,8 +159,8 @@ def build_message(sunset_jst):
     lines = [
         "🌌 相模原の天体観測情報（自動）",
         f"{now:%Y-%m-%d (%a)}",
-        f"【今日】指数: {starry_data[0][0]} / 降水: {rain_data[0]} / {starry_data[0][1]}",
-        f"【明日】指数: {starry_data[1][0]} / 降水: {rain_data[1]} / {starry_data[1][1]}",
+        f"【今日】 指数: {starry[0][0]} / 降水: {rains[0]} / {starry[0][1]}",
+        f"【明日】 指数: {starry[1][0]} / 降水: {rains[1]} / {starry[1][1]}",
         f"🌙 月齢: {moon_age}日",
         f"🕓 今日の日没（相模原）: {sunset_jst.strftime('%H:%M')}",
         f"🌅 明日の日の出（相模原）: {sunrise_next.strftime('%H:%M')}",
@@ -149,37 +171,23 @@ def build_message(sunset_jst):
         "🔗 雲量(元データ): " + OPEN_METEO_URL,
     ]
 
-    # === ここからテスト表示（同じ通知の中） ===
-    lines.append("")
-    lines.append("🧪 雲量バー表示テスト")
-    to_zen = str.maketrans("0123456789%() ", "０１２３４５６７８９％（）　")
-    MAX_BAR = 20
-
-    def pad_percent_test(val: int) -> str:
-        if val < 10:
-            pad = "　　"   # 全角2
-        elif val < 100:
-            pad = "　"    # 全角1
-        else:
-            pad = ""
-        return f"{pad}{val}".translate(to_zen) + "％"
-
-    for c in [0, 25, 50, 75, 100]:
-        bar = "▮" * int(c / 100 * MAX_BAR)
-        pct = pad_percent_test(c)
-        lines.append(f"１７時（{pct}）: {bar}")
-    # === ここまで ===
-
     return "\n".join(lines)
 
 # ==============================
-# メイン処理
+# 8. ntfyに送る
+# ==============================
+def send_ntfy(msg: str):
+    r = requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=msg.encode("utf-8"), timeout=10)
+    r.raise_for_status()
+
+# ==============================
+# 9. メイン処理
 # ==============================
 def main():
     now = datetime.now(JST)
     sunset, _ = fetch_sun_times()
 
-    # GitHub Actions 手動実行なら必ず送る
+    # GitHub Actions からの手動実行なら強制で送る
     event_name = os.getenv("GITHUB_EVENT_NAME", "")
     is_manual = (event_name == "workflow_dispatch")
 
@@ -193,18 +201,22 @@ def main():
     should_notify = False
     reason = ""
 
-    # 日没1時間前を30分単位で切り下げ
+    # 日没1時間前を30分に切り下げ
     notify_time = sunset - timedelta(hours=1)
-    notify_time = notify_time.replace(minute=(notify_time.minute // 30) * 30, second=0, microsecond=0)
+    notify_time = notify_time.replace(
+        minute=(notify_time.minute // 30) * 30,
+        second=0,
+        microsecond=0,
+    )
 
-    # 朝7時ごろ
+    # 朝7:00ごろ
     if now.hour == 7 and now.minute < 10:
         should_notify = True
         reason = "morning"
-    # 日没前
+    # 日没1時間前ブロック内
     elif notify_time <= now < notify_time + timedelta(minutes=10):
         should_notify = True
-        reason = "sunset-1h block"
+        reason = "sunset-1h"
 
     if should_notify:
         msg = build_message(sunset)
