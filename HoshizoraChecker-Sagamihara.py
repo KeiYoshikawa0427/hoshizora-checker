@@ -3,13 +3,13 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 
-# =========================================================
+# ==============================
 # 設定
-# =========================================================
+# ==============================
 NTFY_TOPIC = "HoshizoraChecker-Sagamihara"
 STARRY_URL = "https://tenki.jp/indexes/starry_sky/3/17/4620/14150/"
 FORECAST_URL = "https://tenki.jp/forecast/3/17/4620/14150/"
-LAT = 35.5714   # 相模原近辺
+LAT = 35.5714
 LON = 139.3733
 CLOUD_URL = (
     "https://api.open-meteo.com/v1/forecast"
@@ -17,11 +17,11 @@ CLOUD_URL = (
 )
 JST = timezone(timedelta(hours=9))
 LAST_FILE = ".last_sent"
-DEBUG_FORCE_NOTIFY = True  # 手動実行でも通知させる
+DEBUG_FORCE_NOTIFY = True  # 手動実行でも送る
 
-# =========================================================
+# ==============================
 # 共通
-# =========================================================
+# ==============================
 def _make_soup(html: str) -> BeautifulSoup:
     try:
         return BeautifulSoup(html, "lxml")
@@ -53,9 +53,9 @@ def floor_to_30(dt: datetime) -> datetime:
     minute = 0 if dt.minute < 30 else 30
     return dt.replace(minute=minute, second=0, microsecond=0)
 
-# =========================================================
+# ==============================
 # 星空指数・降水
-# =========================================================
+# ==============================
 def fetch_starry_today_tomorrow():
     r = requests.get(STARRY_URL, timeout=10)
     r.raise_for_status()
@@ -111,14 +111,13 @@ def fetch_rain_today_tomorrow():
             break
     return today_prob, tomorrow_prob
 
-# =========================================================
-# 雲量（全角固定幅: 時間と％を全角で統一）
-# =========================================================
+# ==============================
+# 雲量（全角時間＋全角％＋半角ブロック█20個）
+# ==============================
 def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> str:
     """
-    例:
-    １７時（１００％）: ####################
-    １８時（　２５％）: ######
+    １７時（１００％）: ████████████████████
+    １８時（　５０％）: ██████████
     １９時（　　０％）:
     """
     r = requests.get(CLOUD_URL, timeout=10)
@@ -129,59 +128,47 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
     covers = data["hourly"]["cloudcover"]
 
     lines = []
-    MAX_BAR = 20  # 棒の最大長
+    MAX_BAR = 20  # 半角ブロック20個で100%
 
-    # 半角→全角変換テーブル
     to_zen = str.maketrans("0123456789%() ", "０１２３４５６７８９％（）　")
 
     for t, c in zip(times, covers):
         dt = datetime.fromisoformat(t).replace(tzinfo=JST)
         if sunset_jst <= dt <= sunrise_next_jst:
             bar_len = int(c / 100 * MAX_BAR)
-            bar = "■" * bar_len
-            # 全角化した時間・パーセント
+            bar = "█" * bar_len
             hour_zen = f"{dt.hour:02d}".translate(to_zen)
             pct = f"{c:3d}%".translate(to_zen)
             line = f"{hour_zen}時（{pct}）: {bar}"
-            lines.append(line.rstrip())
+            lines.append(line)
 
     return "\n".join(lines) if lines else "データなし"
 
-# =========================================================
-# 通知制御
-# =========================================================
+# ==============================
+# 通知・メッセージ生成
+# ==============================
 def should_send(now_jst: datetime, sunset_jst: datetime) -> bool:
-    # 朝7時帯
     if (now_jst.hour == 6 and now_jst.minute >= 30) or (now_jst.hour == 7 and now_jst.minute < 30):
         return True
-    # 日没1時間前を30分に切り下げ
     target = floor_to_30(sunset_jst - timedelta(hours=1))
     now_block = floor_to_30(now_jst)
     return now_jst < sunset_jst and now_block == target
 
-# =========================================================
-# メッセージ生成
-# =========================================================
 def build_message(sunset_jst: datetime) -> str:
     today = datetime.now(JST).date()
     moon_age = calc_moon_age(today)
     sunrise_next = fetch_sunrise_jst(for_tomorrow=True)
     cloud_text = fetch_night_cloudcover(sunset_jst, sunrise_next)
 
-    # 星空・降水
     try:
         star_rows = fetch_starry_today_tomorrow()
-        star_err = ""
-    except Exception as e:
+    except Exception:
         star_rows = []
-        star_err = str(e)
 
     try:
         today_rain, tomorrow_rain = fetch_rain_today_tomorrow()
-        rain_err = ""
-    except Exception as e:
+    except Exception:
         today_rain = tomorrow_rain = "?"
-        rain_err = str(e)
 
     lines = [
         "🌌 相模原の天体観測情報（自動）",
@@ -207,12 +194,8 @@ def build_message(sunset_jst: datetime) -> str:
     lines.append(f"🔗 星空指数: {STARRY_URL}")
     lines.append(f"🔗 天気: {FORECAST_URL}")
     lines.append(f"🔗 雲量(元データ): {CLOUD_URL}")
-
     return "\n".join(lines)
 
-# =========================================================
-# 実行
-# =========================================================
 def send_ntfy(text: str):
     r = requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=text.encode("utf-8"), timeout=10)
     r.raise_for_status()
