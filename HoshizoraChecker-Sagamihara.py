@@ -115,11 +115,6 @@ def fetch_rain_today_tomorrow():
 # 雲量（全角時間＋全角％＋半角ブロック▮20個）
 # ==============================
 def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> str:
-    """
-    １７時（１００％）: ▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮
-    １８時（　５０％）: ▮▮▮▮▮▮▮▮▮▮
-    １９時（　　０％）:
-    """
     r = requests.get(CLOUD_URL, timeout=10)
     r.raise_for_status()
     data = r.json()
@@ -128,15 +123,13 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
     covers = data["hourly"]["cloudcover"]
 
     lines = []
-    MAX_BAR = 20  # 半角ブロック20個で100%
-
+    MAX_BAR = 20
     to_zen = str.maketrans("0123456789%() ", "０１２３４５６７８９％（）　")
 
     for t, c in zip(times, covers):
         dt = datetime.fromisoformat(t).replace(tzinfo=JST)
         if sunset_jst <= dt <= sunrise_next_jst:
             bar_len = int(c / 100 * MAX_BAR)
-            # ▮（U+25AE）を使用：iOSで全角化されないブロック
             bar = "▮" * bar_len + " "
             hour_zen = f"{dt.hour:02d}".translate(to_zen)
             pct = f"{c:3d}%".translate(to_zen)
@@ -191,6 +184,16 @@ def build_message(sunset_jst: datetime) -> str:
     lines.append("")
     lines.append(f"☁️ 夜間雲量予報（{sunset_jst.strftime('%H:%M')}〜{sunrise_next.strftime('%H:%M')}）")
     lines.append(cloud_text)
+
+    # === ここからテスト表示ブロック ===
+    lines.append("")
+    lines.append("🧪 雲量バー表示テスト")
+    MAX_BAR = 20
+    for c in [0, 25, 50, 75, 100]:
+        bar = "▮" * int(c / 100 * MAX_BAR)
+        lines.append(f"１７時（{str(c).rjust(3)}％）: {bar}")
+    # === ここまで ===
+
     lines.append("")
     lines.append(f"🔗 星空指数: {STARRY_URL}")
     lines.append(f"🔗 天気: {FORECAST_URL}")
