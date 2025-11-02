@@ -17,7 +17,7 @@ CLOUD_URL = (
 )
 JST = timezone(timedelta(hours=9))
 LAST_FILE = ".last_sent"
-DEBUG_FORCE_NOTIFY = True  # 手動実行でも送る
+DEBUG_FORCE_NOTIFY = False  # 手動実行でも送る
 
 # ==============================
 # 共通
@@ -244,3 +244,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
