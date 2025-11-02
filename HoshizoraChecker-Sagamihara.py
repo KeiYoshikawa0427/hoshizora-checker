@@ -17,7 +17,7 @@ CLOUD_URL = (
 )
 JST = timezone(timedelta(hours=9))
 LAST_FILE = ".last_sent"
-DEBUG_FORCE_NOTIFY = False  # 手動実行でも送る
+DEBUG_FORCE_NOTIFY = True  # 手動実行でも送る
 
 # ==============================
 # 共通
@@ -136,7 +136,6 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
         dt = datetime.fromisoformat(t).replace(tzinfo=JST)
         if sunset_jst <= dt <= sunrise_next_jst:
             bar_len = int(c / 100 * MAX_BAR)
-            # ▮（U+25AE）を使用：iOSで全角化されないブロック
             bar = "▮" * bar_len + " "
             hour_zen = f"{dt.hour:02d}".translate(to_zen)
             pct = f"{c:3d}%".translate(to_zen)
@@ -149,11 +148,14 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
 # 通知・メッセージ生成
 # ==============================
 def should_send(now_jst: datetime, sunset_jst: datetime) -> bool:
-    if (now_jst.hour == 6 and now_jst.minute >= 30) or (now_jst.hour == 7 and now_jst.minute < 30):
+    """遅延対策を含む送信ウィンドウ判定"""
+    # 朝6:30〜7:30（10分遅延吸収）
+    if (now_jst.hour == 6 and now_jst.minute >= 20) or (now_jst.hour == 7 and now_jst.minute < 40):
         return True
+    # 日没1時間前ブロック ±10分許容
     target = floor_to_30(sunset_jst - timedelta(hours=1))
-    now_block = floor_to_30(now_jst)
-    return now_jst < sunset_jst and now_block == target
+    delta = abs((now_jst - target).total_seconds())
+    return now_jst < sunset_jst and delta <= 10 * 60  # 10分以内ならOK
 
 def build_message(sunset_jst: datetime) -> str:
     today = datetime.now(JST).date()
@@ -202,6 +204,7 @@ def send_ntfy(text: str):
     r.raise_for_status()
 
 def already_sent_today(block_label: str) -> bool:
+    """同じ日付・同じブロックなら送らない"""
     return os.path.exists(LAST_FILE) and open(LAST_FILE).read().strip() == block_label
 
 def mark_sent(block_label: str):
@@ -221,12 +224,15 @@ def main():
         print("[DEBUG] Manual run: notification sent")
         return
 
+    # 遅延対策付きの should_send 判定
     if not should_send(now_jst, sunset_jst):
         print(f"[{now_jst}] skip: not in window")
         return
 
+    # 遅延に対応するブロックラベル生成
     target_block = floor_to_30(sunset_jst - timedelta(hours=1))
     block_label = f"{now_jst.date()}_{target_block.strftime('%H%M')}"
+
     if already_sent_today(block_label):
         print(f"skip: already sent for block {block_label}")
         return
@@ -234,7 +240,7 @@ def main():
     msg = build_message(sunset_jst)
     send_ntfy(msg)
     mark_sent(block_label)
+    print(f"[{now_jst}] sent: {block_label}")
 
 if __name__ == "__main__":
     main()
-
