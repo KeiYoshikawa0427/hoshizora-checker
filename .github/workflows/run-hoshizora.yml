@@ -2,14 +2,13 @@ name: HoshizoraChecker Quarter-Hourly
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '5,15,25,35,45,55 * * * *'  # ← UTC基準で5分ずらし（JSTでは14,24,34,44,54,04分）
   workflow_dispatch:
 
 jobs:
   run-hoshizora:
     runs-on: ubuntu-latest
 
-    # 同時実行のキャンセル（重複防止）
     concurrency:
       group: hoshizora-checker
       cancel-in-progress: true
