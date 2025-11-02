@@ -145,9 +145,8 @@ def fetch_rain_today_tomorrow():
 # ==============================
 def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> str:
     """
-    １７時（１００％）: ▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮
-    １８時（　５０％）: ▮▮▮▮▮▮▮▮▮▮
-    １９時（　　０％）:
+    日没～翌日の日の出の間の雲量を時系列順に表示。
+    24時をまたぐときも正しく連続して表示する。
     """
     r = requests.get(CLOUD_URL, timeout=10)
     r.raise_for_status()
@@ -156,20 +155,19 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
     times = data["hourly"]["time"]
     covers = data["hourly"]["cloudcover"]
 
-    lines = []
     MAX_BAR = 20  # 半角ブロック20個で100%
-
+    lines = []
     to_zen = str.maketrans("0123456789%() ", "０１２３４５６７８９％（）　")
 
     for t, c in zip(times, covers):
         dt = datetime.fromisoformat(t).replace(tzinfo=JST)
-        if sunset_jst <= dt <= sunrise_next_jst:
+        # 日没〜翌日の日の出の範囲に含まれる時刻を抽出
+        if sunset_jst <= dt < sunrise_next_jst:
             bar_len = int(c / 100 * MAX_BAR)
             bar = "▮" * bar_len + " "
             hour_zen = f"{dt.hour:02d}".translate(to_zen)
             pct = f"{c:3d}%".translate(to_zen)
-            line = f"{hour_zen}時（{pct}）: {bar}"
-            lines.append(line)
+            lines.append(f"{hour_zen}時（{pct}）: {bar}")
 
     return "\n".join(lines) if lines else "データなし"
 
