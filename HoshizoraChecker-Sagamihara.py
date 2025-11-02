@@ -145,8 +145,9 @@ def fetch_rain_today_tomorrow():
 # ==============================
 def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> str:
     """
-    日没～翌日の日の出の間の雲量を時系列順に表示。
-    24時をまたぐときも正しく連続して表示する。
+    「この日の16:48ごろの日没」から「翌日の06:05ごろの日の出」までに該当する
+    時間帯だけを抜き出して表示する。
+    実行時刻が深夜でも、この日の日没〜翌日の日の出だけに限定される。
     """
     r = requests.get(CLOUD_URL, timeout=10)
     r.raise_for_status()
@@ -159,15 +160,28 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
     lines = []
     to_zen = str.maketrans("0123456789%() ", "０１２３４５６７８９％（）　")
 
+    sunset_date = sunset_jst.date()
+    sunrise_date = sunrise_next_jst.date()
+    sunset_time = sunset_jst.time()
+    sunrise_time = sunrise_next_jst.time()
+
     for t, c in zip(times, covers):
         dt = datetime.fromisoformat(t).replace(tzinfo=JST)
-        # 日没〜翌日の日の出の範囲に含まれる時刻を抽出
-        if sunset_jst <= dt < sunrise_next_jst:
-            bar_len = int(c / 100 * MAX_BAR)
-            bar = "▮" * bar_len + " "
-            hour_zen = f"{dt.hour:02d}".translate(to_zen)
-            pct = f"{c:3d}%".translate(to_zen)
-            lines.append(f"{hour_zen}時（{pct}）: {bar}")
+
+        # --- ここが今回のポイント ---
+        # 1) 日没当日で、日没時刻以降
+        is_after_sunset = (dt.date() == sunset_date) and (dt.time() >= sunset_time)
+        # 2) 翌日で、日の出時刻まで
+        is_before_sunrise = (dt.date() == sunrise_date) and (dt.time() <= sunrise_time)
+
+        if not (is_after_sunset or is_before_sunrise):
+            continue
+
+        bar_len = int(c / 100 * MAX_BAR)
+        bar = "▮" * bar_len + " "
+        hour_zen = f"{dt.hour:02d}".translate(to_zen)
+        pct = f"{c:3d}%".translate(to_zen)
+        lines.append(f"{hour_zen}時（{pct}）: {bar}")
 
     return "\n".join(lines) if lines else "データなし"
 
