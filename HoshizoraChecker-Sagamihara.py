@@ -145,9 +145,9 @@ def fetch_rain_today_tomorrow():
 # ==============================
 def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> str:
     """
-    「この日の16:48ごろの日没」から「翌日の06:05ごろの日の出」までに該当する
-    時間帯だけを抜き出して表示する。
-    実行時刻が深夜でも、この日の日没〜翌日の日の出だけに限定される。
+    どの時間に実行しても、
+    「sunset_jst 〜 sunrise_next_jst」の区間に“巻き取って”表示する。
+    00時から始まってしまうのを防ぐために、日付ではなく「時間帯シフト」で判定する。
     """
     r = requests.get(CLOUD_URL, timeout=10)
     r.raise_for_status()
@@ -160,28 +160,30 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
     lines = []
     to_zen = str.maketrans("0123456789%() ", "０１２３４５６７８９％（）　")
 
-    sunset_date = sunset_jst.date()
-    sunrise_date = sunrise_next_jst.date()
-    sunset_time = sunset_jst.time()
-    sunrise_time = sunrise_next_jst.time()
+    # 比較用に「終了のほうが開始より後ろ」になるようにしておく
+    start = sunset_jst
+    end = sunrise_next_jst
+    if end <= start:
+        end = end + timedelta(days=1)
 
     for t, c in zip(times, covers):
-        dt = datetime.fromisoformat(t).replace(tzinfo=JST)
+        dt = datetime.fromisoformat(t)
+        # APIは+09:00を返すはずだが、なかった場合に備えて
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=JST)
 
-        # --- ここが今回のポイント ---
-        # 1) 日没当日で、日没時刻以降
-        is_after_sunset = (dt.date() == sunset_date) and (dt.time() >= sunset_time)
-        # 2) 翌日で、日の出時刻まで
-        is_before_sunrise = (dt.date() == sunrise_date) and (dt.time() <= sunrise_time)
+        # dt が start より前の時刻（＝たとえば翌日の0〜6時）なら
+        # 「翌日の分だな」とみなして +1日 してから比較する
+        dt_for_cmp = dt
+        if dt_for_cmp < start:
+            dt_for_cmp = dt_for_cmp + timedelta(days=1)
 
-        if not (is_after_sunset or is_before_sunrise):
-            continue
-
-        bar_len = int(c / 100 * MAX_BAR)
-        bar = "▮" * bar_len + " "
-        hour_zen = f"{dt.hour:02d}".translate(to_zen)
-        pct = f"{c:3d}%".translate(to_zen)
-        lines.append(f"{hour_zen}時（{pct}）: {bar}")
+        if start <= dt_for_cmp <= end:
+            bar_len = int(c / 100 * MAX_BAR)
+            bar = "▮" * bar_len + " "
+            hour_zen = f"{dt.hour:02d}".translate(to_zen)
+            pct = f"{c:3d}%".translate(to_zen)
+            lines.append(f"{hour_zen}時（{pct}）: {bar}")
 
     return "\n".join(lines) if lines else "データなし"
 
