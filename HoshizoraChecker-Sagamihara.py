@@ -17,7 +17,7 @@ CLOUD_URL = (
 )
 JST = timezone(timedelta(hours=9))
 LAST_FILE = ".last_sent"
-DEBUG_FORCE_NOTIFY = True  # 手動実行でも送る
+DEBUG_FORCE_NOTIFY = True  # 手動実行でも送る（本番で不要ならFalseに）
 
 # ==============================
 # 共通関数
@@ -52,7 +52,7 @@ def fetch_sunrise_jst(for_tomorrow: bool = False) -> datetime:
     return sunrise_utc.astimezone(JST)
 
 
-# --- 修正版（日付をJSTで指定） ---
+# --- JST日付で日没を取得する ---
 def fetch_sunset_jst() -> datetime:
     today_jst = datetime.now(JST).date()
     url = (
@@ -140,12 +140,17 @@ def fetch_rain_today_tomorrow():
 
 
 # ==============================
-# 雲量グラフ（JST日没〜翌日の日の出）
+# 雲量（ここを今回だけ修正）
 # ==============================
 def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> str:
+    """
+    日没〜翌日の日の出の間にある時刻だけを取り出し、
+    そのうえで「日没→…→翌朝」の時系列になるよう並べ替えて表示する。
+    """
     r = requests.get(CLOUD_URL, timeout=10)
     r.raise_for_status()
     data = r.json()
+
     times = data["hourly"]["time"]
     covers = data["hourly"]["cloudcover"]
 
@@ -153,24 +158,38 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
     lines = []
     to_zen = str.maketrans("0123456789%() ", "０１２３４５６７８９％（）　")
 
+    # 比較用の開始・終了（終了が先なら+1日）
     start = sunset_jst
     end = sunrise_next_jst
     if end <= start:
         end = end + timedelta(days=1)
 
+    # いったん候補を全部ためる
+    night_data = []
     for t, c in zip(times, covers):
         dt = datetime.fromisoformat(t)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=JST)
+
+        # 比較用に「日没より前なら翌日分」として+1日
         dt_for_cmp = dt
         if dt_for_cmp < start:
             dt_for_cmp = dt_for_cmp + timedelta(days=1)
+
+        # 範囲内なら採用
         if start <= dt_for_cmp <= end:
-            bar_len = int(c / 100 * MAX_BAR)
-            bar = "▮" * bar_len + " "
-            hour_zen = f"{dt.hour:02d}".translate(to_zen)
-            pct = f"{c:3d}%".translate(to_zen)
-            lines.append(f"{hour_zen}時（{pct}）: {bar}")
+            # (比較用の時刻, 元の時刻, 雲量) の形で入れておく
+            night_data.append((dt_for_cmp, dt, c))
+
+    # ここが今回のキモ：比較用の時刻でソートして「夜の時系列」にする
+    night_data.sort(key=lambda x: x[0])
+
+    for _, dt_orig, c in night_data:
+        bar_len = int(c / 100 * MAX_BAR)
+        bar = "▮" * bar_len + " "
+        hour_zen = f"{dt_orig.hour:02d}".translate(to_zen)
+        pct = f"{c:3d}%".translate(to_zen)
+        lines.append(f"{hour_zen}時（{pct}）: {bar}")
 
     return "\n".join(lines) if lines else "データなし"
 
@@ -235,17 +254,21 @@ def send_ntfy(text: str):
 
 
 # ==============================
-# 朝夕の通知タイミング判定
+# 朝夕の送信判定
 # ==============================
 def which_window(now_jst: datetime, sunset_jst: datetime) -> str | None:
+    # 朝 6:20〜7:40
     if (now_jst.hour == 6 and now_jst.minute >= 20) or (
         now_jst.hour == 7 and now_jst.minute < 40
     ):
         return "morning"
+
+    # 夕方：日没1時間前（30分丸め）±30分
     target = floor_to_30(sunset_jst - timedelta(hours=1))
     delta = abs((now_jst - target).total_seconds())
     if now_jst < sunset_jst and delta <= 30 * 60:
         return "evening"
+
     return None
 
 
@@ -264,6 +287,7 @@ def main():
     event_name = os.getenv("GITHUB_EVENT_NAME", "")
     is_manual = event_name == "workflow_dispatch"
 
+    # 手動runは重複防止に関係なく送る
     if DEBUG_FORCE_NOTIFY and is_manual:
         msg = build_message(sunset_jst)
         send_ntfy(msg)
@@ -279,6 +303,7 @@ def main():
         block_label = f"{now_jst.date()}_morning"
     else:
         target_block = floor_to_30(sunset_jst - timedelta(hours=1))
+        # 夕方は「日没の日付」でタグをつける
         block_label = f"{sunset_jst.date()}_evening_{target_block.strftime('%H%M')}"
 
     if already_sent_today(block_label):
