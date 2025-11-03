@@ -2,7 +2,7 @@ name: HoshizoraChecker Quarter-Hourly
 
 on:
   schedule:
-    - cron: '5,15,25,35,45,55 * * * *'  # ← UTC基準で5分ずらし（JSTでは14,24,34,44,54,04分）
+    - cron: '5,15,25,35,45,55 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -17,6 +17,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Cache last_sent
+        uses: actions/cache@v4
+        with:
+          path: .last_sent
+          key: hoshizora-last-sent-${{ github.run_number }}
+          restore-keys: |
+            hoshizora-last-sent-
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -29,4 +37,4 @@ jobs:
       - name: Run script
         run: |
           echo "Run at $(date -u)"
-          python HoshizoraChecker-Sagamihara.py
+          python Hoshizorachecker-Sagamihara.py
