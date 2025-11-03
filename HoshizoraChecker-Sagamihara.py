@@ -17,7 +17,7 @@ CLOUD_URL = (
 )
 JST = timezone(timedelta(hours=9))
 LAST_FILE = ".last_sent"
-DEBUG_FORCE_NOTIFY = True  # 手動実行でも通知したいときは True、本番で不要なら False に
+DEBUG_FORCE_NOTIFY = True  # 本番で不要なら False
 
 # ==============================
 # 共通
@@ -30,7 +30,6 @@ def _make_soup(html: str) -> BeautifulSoup:
 
 
 def calc_moon_age(date: datetime.date) -> float:
-    """単純な月齢計算（近似）。"""
     base = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
     dt_utc = datetime(date.year, date.month, date.day, tzinfo=timezone.utc)
     days = (dt_utc - base).total_seconds() / 86400.0
@@ -38,7 +37,6 @@ def calc_moon_age(date: datetime.date) -> float:
 
 
 def fetch_sunrise_jst(for_tomorrow: bool = False) -> datetime:
-    """日付をJSTで指定して sunrise-sunset.org から日の出を取得。"""
     target_date = datetime.now(JST).date() + (
         timedelta(days=1) if for_tomorrow else timedelta(days=0)
     )
@@ -55,7 +53,6 @@ def fetch_sunrise_jst(for_tomorrow: bool = False) -> datetime:
 
 
 def fetch_sunset_jst() -> datetime:
-    """JSTの「今日」を指定して、その日の相模原の日没を取得。"""
     today_jst = datetime.now(JST).date()
     url = (
         f"https://api.sunrise-sunset.org/json?"
@@ -70,7 +67,6 @@ def fetch_sunset_jst() -> datetime:
 
 
 def floor_to_30(dt: datetime) -> datetime:
-    """分を0か30にそろえる。"""
     minute = 0 if dt.minute < 30 else 30
     return dt.replace(minute=minute, second=0, microsecond=0)
 
@@ -91,7 +87,6 @@ def fetch_starry_today_tomorrow():
         index_val = alt.split("指数:")[-1].strip() if "指数:" in alt else "?"
         comment = ""
         parent = img.parent
-        # 近くのテキストからコメントを拾う
         for _ in range(5):
             if parent is None:
                 break
@@ -106,9 +101,7 @@ def fetch_starry_today_tomorrow():
 
         label = "今日" if i == 0 else "明日"
         date_str = (
-            today_date
-            if label == "今日"
-            else today_date + timedelta(days=1)
+            today_date if label == "今日" else today_date + timedelta(days=1)
         ).strftime("%Y-%m-%d (%a)")
         entries.append(
             {"label": label, "date": date_str, "index": index_val, "comment": comment}
@@ -144,12 +137,12 @@ def fetch_rain_today_tomorrow():
 
 
 # ==============================
-# 雲量（決定版：日付で正しく切る）
+# 雲量（重複時刻を1つにする・日没日と翌日だけ）
 # ==============================
 def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> str:
     """
-    日没の日の「日没以降」と、翌日の日の出まで「だけ」を採用する。
-    これにより 00時 が2回出るような重複を防ぐ。
+    日没当日(夕方〜24時)と、翌日(0時〜日の出)だけを対象にし、
+    さらに同じ hour が複数あったら最初の1つだけ採用する。
     """
     r = requests.get(CLOUD_URL, timeout=10)
     r.raise_for_status()
@@ -176,26 +169,31 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
         d = dt.date()
         tm = dt.time()
 
-        # ① 日没当日で、日没時刻以降 → 採用
+        # 日没当日で日没以降
         if d == sunset_date and tm >= sunset_time:
             picked.append((dt, c))
             continue
 
-        # ② 翌日で、日の出まで → 採用
+        # 翌日で日の出まで
         if d == sunrise_date and tm <= sunrise_time:
             picked.append((dt, c))
             continue
 
-        # それ以外は無視
-
-    # 時系列順に並べる（17→18→…→23→00→…→06）
+    # 時系列に並べる
     picked.sort(key=lambda x: x[0])
 
+    # 同じ hour を1つにする
     lines = []
+    seen_hours = set()
     for dt, c in picked:
+        hour = dt.hour
+        if hour in seen_hours:
+            continue
+        seen_hours.add(hour)
+
         bar_len = int(c / 100 * MAX_BAR)
         bar = "▮" * bar_len + " "
-        hour_zen = f"{dt.hour:02d}".translate(to_zen)
+        hour_zen = f"{hour:02d}".translate(to_zen)
         pct = f"{c:3d}%".translate(to_zen)
         lines.append(f"{hour_zen}時（{pct}）: {bar}")
 
@@ -241,9 +239,9 @@ def build_message(sunset_jst: datetime) -> str:
 
     lines.append(f"🌙 月齢: {moon_age:.1f}日")
     lines.append(f"🕗 今日の日没（相模原）: {sunset_jst.strftime('%H:%M')}")
-    lines.append(f"🌅 明日の日の出（相模原）: {sunrise_next.strftime('%H:%M')}")
+    lines.append(f"🌅 明日の日の出（相模原）: {fetch_sunrise_jst(for_tomorrow=True).strftime('%H:%M')}")
     lines.append("")
-    lines.append(f"☁️ 夜間雲量予報（{sunset_jst.strftime('%H:%M')}〜{sunrise_next.strftime('%H:%M')}）")
+    lines.append(f"☁️ 夜間雲量予報（{sunset_jst.strftime('%H:%M')}〜{fetch_sunrise_jst(for_tomorrow=True).strftime('%H:%M')}）")
     lines.append(cloud_text)
     lines.append("")
     lines.append(f"🔗 星空指数: {STARRY_URL}")
@@ -262,7 +260,7 @@ def send_ntfy(text: str):
 
 
 # ==============================
-# 朝夕の送信ウィンドウ
+# 朝夕の送信判定
 # ==============================
 def which_window(now_jst: datetime, sunset_jst: datetime) -> str | None:
     # 朝 6:20〜7:40
@@ -281,7 +279,7 @@ def which_window(now_jst: datetime, sunset_jst: datetime) -> str | None:
 
 
 # ==============================
-# 重複防止（ファイルで記録）※Actions側でcacheする想定
+# 重複防止
 # ==============================
 def already_sent_today(block_label: str) -> bool:
     return os.path.exists(LAST_FILE) and open(LAST_FILE).read().strip() == block_label
@@ -301,7 +299,7 @@ def main():
     event_name = os.getenv("GITHUB_EVENT_NAME", "")
     is_manual = event_name == "workflow_dispatch"
 
-    # 手動実行のときは即送る（本番で不要ならこのブロックを削除）
+    # 手動実行はそのまま送る
     if DEBUG_FORCE_NOTIFY and is_manual:
         msg = build_message(sunset_jst)
         send_ntfy(msg)
@@ -314,10 +312,8 @@ def main():
         return
 
     if period == "morning":
-        # 朝は実行日でタグ
         block_label = f"{now_jst.date()}_morning"
     else:
-        # 夕方は「その日の日没の日付」でタグ
         target_block = floor_to_30(sunset_jst - timedelta(hours=1))
         block_label = f"{sunset_jst.date()}_evening_{target_block.strftime('%H%M')}"
 
