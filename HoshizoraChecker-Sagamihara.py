@@ -16,11 +16,11 @@ CLOUD_URL = (
     f"?latitude={LAT}&longitude={LON}&hourly=cloudcover&timezone=Asia/Tokyo"
 )
 JST = timezone(timedelta(hours=9))
-LAST_FILE = ".last_sent"  # ←これをそのまま使うが、中身に「morning / evening」を書くようにする
+LAST_FILE = ".last_sent"
 DEBUG_FORCE_NOTIFY = True  # 手動実行でも送る
 
 # ==============================
-# 共通
+# 共通関数
 # ==============================
 def _make_soup(html: str) -> BeautifulSoup:
     try:
@@ -52,8 +52,13 @@ def fetch_sunrise_jst(for_tomorrow: bool = False) -> datetime:
     return sunrise_utc.astimezone(JST)
 
 
+# --- 修正版（日付をJSTで指定） ---
 def fetch_sunset_jst() -> datetime:
-    url = f"https://api.sunrise-sunset.org/json?lat={LAT}&lng={LON}&formatted=0"
+    today_jst = datetime.now(JST).date()
+    url = (
+        f"https://api.sunrise-sunset.org/json?"
+        f"lat={LAT}&lng={LON}&date={today_jst.isoformat()}&formatted=0"
+    )
     r = requests.get(url, timeout=10)
     r.raise_for_status()
     sunset_utc = datetime.fromisoformat(
@@ -83,7 +88,6 @@ def fetch_starry_today_tomorrow():
         index_val = alt.split("指数:")[-1].strip() if "指数:" in alt else "?"
         comment = ""
         parent = img.parent
-        # コメントを上の方からたどって取る
         for _ in range(5):
             if parent is None:
                 break
@@ -103,12 +107,7 @@ def fetch_starry_today_tomorrow():
             else today_date + timedelta(days=1)
         ).strftime("%Y-%m-%d (%a)")
         entries.append(
-            {
-                "label": label,
-                "date": date_str,
-                "index": index_val,
-                "comment": comment,
-            }
+            {"label": label, "date": date_str, "index": index_val, "comment": comment}
         )
     return entries
 
@@ -141,26 +140,19 @@ def fetch_rain_today_tomorrow():
 
 
 # ==============================
-# 雲量（全角時間＋全角％＋半角ブロック▮20個）
+# 雲量グラフ（JST日没〜翌日の日の出）
 # ==============================
 def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> str:
-    """
-    どの時間に実行しても、
-    「sunset_jst 〜 sunrise_next_jst」の区間に“巻き取って”表示する。
-    00時から始まってしまうのを防ぐために、日付ではなく「時間帯シフト」で判定する。
-    """
     r = requests.get(CLOUD_URL, timeout=10)
     r.raise_for_status()
     data = r.json()
-
     times = data["hourly"]["time"]
     covers = data["hourly"]["cloudcover"]
 
-    MAX_BAR = 20  # 半角ブロック20個で100%
+    MAX_BAR = 20
     lines = []
     to_zen = str.maketrans("0123456789%() ", "０１２３４５６７８９％（）　")
 
-    # 比較用に「終了のほうが開始より後ろ」になるようにしておく
     start = sunset_jst
     end = sunrise_next_jst
     if end <= start:
@@ -168,16 +160,11 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
 
     for t, c in zip(times, covers):
         dt = datetime.fromisoformat(t)
-        # APIは+09:00を返すはずだが、なかった場合に備えて
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=JST)
-
-        # dt が start より前の時刻（＝たとえば翌日の0〜6時）なら
-        # 「翌日の分だな」とみなして +1日 してから比較する
         dt_for_cmp = dt
         if dt_for_cmp < start:
             dt_for_cmp = dt_for_cmp + timedelta(days=1)
-
         if start <= dt_for_cmp <= end:
             bar_len = int(c / 100 * MAX_BAR)
             bar = "▮" * bar_len + " "
@@ -189,7 +176,7 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
 
 
 # ==============================
-# 通知・メッセージ生成
+# 通知メッセージ生成
 # ==============================
 def build_message(sunset_jst: datetime) -> str:
     today = datetime.now(JST).date()
@@ -248,29 +235,21 @@ def send_ntfy(text: str):
 
 
 # ==============================
-# ★ ここを変える：送信判定を「朝 or 夕」で返す
+# 朝夕の通知タイミング判定
 # ==============================
 def which_window(now_jst: datetime, sunset_jst: datetime) -> str | None:
-    """
-    朝なら "morning"、夕方なら "evening"、それ以外は None
-    """
-    # 朝6:20〜7:40（元のロジックをそのまま使う）
     if (now_jst.hour == 6 and now_jst.minute >= 20) or (
         now_jst.hour == 7 and now_jst.minute < 40
     ):
         return "morning"
-
-    # 夕方：日没1時間前（30分丸め）±30分に拡大
     target = floor_to_30(sunset_jst - timedelta(hours=1))
     delta = abs((now_jst - target).total_seconds())
     if now_jst < sunset_jst and delta <= 30 * 60:
         return "evening"
-
     return None
 
 
 def already_sent_today(block_label: str) -> bool:
-    """同じ日付・同じブロックなら送らない"""
     return os.path.exists(LAST_FILE) and open(LAST_FILE).read().strip() == block_label
 
 
@@ -288,23 +267,19 @@ def main():
     if DEBUG_FORCE_NOTIFY and is_manual:
         msg = build_message(sunset_jst)
         send_ntfy(msg)
-        mark_sent("manual_test")
         print("[DEBUG] Manual run: notification sent")
         return
 
-    # どの時間帯の通知かを判定（朝 or 夕 or None）
     period = which_window(now_jst, sunset_jst)
     if not period:
         print(f"[{now_jst}] skip: not in window")
         return
 
-    # ★ 朝と夕でラベルを分ける（→朝に送っても夕方に送れるようにする）
     if period == "morning":
         block_label = f"{now_jst.date()}_morning"
     else:
-        # 夕方は元の「日没1h前を30分丸めた時刻」をラベルに残す
         target_block = floor_to_30(sunset_jst - timedelta(hours=1))
-        block_label = f"{now_jst.date()}_evening_{target_block.strftime('%H%M')}"
+        block_label = f"{sunset_jst.date()}_evening_{target_block.strftime('%H%M')}"
 
     if already_sent_today(block_label):
         print(f"[{now_jst}] skip: already sent for block {block_label}")
