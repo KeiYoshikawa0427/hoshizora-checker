@@ -17,10 +17,10 @@ CLOUD_URL = (
 )
 JST = timezone(timedelta(hours=9))
 LAST_FILE = ".last_sent"
-DEBUG_FORCE_NOTIFY = True  # 手動実行でも送る（本番で不要ならFalseに）
+DEBUG_FORCE_NOTIFY = True  # 手動実行でも通知したいときは True、本番で不要なら False に
 
 # ==============================
-# 共通関数
+# 共通
 # ==============================
 def _make_soup(html: str) -> BeautifulSoup:
     try:
@@ -30,6 +30,7 @@ def _make_soup(html: str) -> BeautifulSoup:
 
 
 def calc_moon_age(date: datetime.date) -> float:
+    """単純な月齢計算（近似）。"""
     base = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
     dt_utc = datetime(date.year, date.month, date.day, tzinfo=timezone.utc)
     days = (dt_utc - base).total_seconds() / 86400.0
@@ -37,6 +38,7 @@ def calc_moon_age(date: datetime.date) -> float:
 
 
 def fetch_sunrise_jst(for_tomorrow: bool = False) -> datetime:
+    """日付をJSTで指定して sunrise-sunset.org から日の出を取得。"""
     target_date = datetime.now(JST).date() + (
         timedelta(days=1) if for_tomorrow else timedelta(days=0)
     )
@@ -52,8 +54,8 @@ def fetch_sunrise_jst(for_tomorrow: bool = False) -> datetime:
     return sunrise_utc.astimezone(JST)
 
 
-# --- JST日付で日没を取得する ---
 def fetch_sunset_jst() -> datetime:
+    """JSTの「今日」を指定して、その日の相模原の日没を取得。"""
     today_jst = datetime.now(JST).date()
     url = (
         f"https://api.sunrise-sunset.org/json?"
@@ -68,6 +70,7 @@ def fetch_sunset_jst() -> datetime:
 
 
 def floor_to_30(dt: datetime) -> datetime:
+    """分を0か30にそろえる。"""
     minute = 0 if dt.minute < 30 else 30
     return dt.replace(minute=minute, second=0, microsecond=0)
 
@@ -88,6 +91,7 @@ def fetch_starry_today_tomorrow():
         index_val = alt.split("指数:")[-1].strip() if "指数:" in alt else "?"
         comment = ""
         parent = img.parent
+        # 近くのテキストからコメントを拾う
         for _ in range(5):
             if parent is None:
                 break
@@ -140,12 +144,12 @@ def fetch_rain_today_tomorrow():
 
 
 # ==============================
-# 雲量（ここを今回だけ修正）
+# 雲量（決定版：日付で正しく切る）
 # ==============================
 def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> str:
     """
-    日没〜翌日の日の出の間にある時刻だけを取り出し、
-    そのうえで「日没→…→翌朝」の時系列になるよう並べ替えて表示する。
+    日没の日の「日没以降」と、翌日の日の出まで「だけ」を採用する。
+    これにより 00時 が2回出るような重複を防ぐ。
     """
     r = requests.get(CLOUD_URL, timeout=10)
     r.raise_for_status()
@@ -155,39 +159,43 @@ def fetch_night_cloudcover(sunset_jst: datetime, sunrise_next_jst: datetime) -> 
     covers = data["hourly"]["cloudcover"]
 
     MAX_BAR = 20
-    lines = []
     to_zen = str.maketrans("0123456789%() ", "０１２３４５６７８９％（）　")
 
-    # 比較用の開始・終了（終了が先なら+1日）
-    start = sunset_jst
-    end = sunrise_next_jst
-    if end <= start:
-        end = end + timedelta(days=1)
+    sunset_date = sunset_jst.date()
+    sunrise_date = sunrise_next_jst.date()
+    sunset_time = sunset_jst.time()
+    sunrise_time = sunrise_next_jst.time()
 
-    # いったん候補を全部ためる
-    night_data = []
+    picked: list[tuple[datetime, int]] = []
+
     for t, c in zip(times, covers):
         dt = datetime.fromisoformat(t)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=JST)
 
-        # 比較用に「日没より前なら翌日分」として+1日
-        dt_for_cmp = dt
-        if dt_for_cmp < start:
-            dt_for_cmp = dt_for_cmp + timedelta(days=1)
+        d = dt.date()
+        tm = dt.time()
 
-        # 範囲内なら採用
-        if start <= dt_for_cmp <= end:
-            # (比較用の時刻, 元の時刻, 雲量) の形で入れておく
-            night_data.append((dt_for_cmp, dt, c))
+        # ① 日没当日で、日没時刻以降 → 採用
+        if d == sunset_date and tm >= sunset_time:
+            picked.append((dt, c))
+            continue
 
-    # ここが今回のキモ：比較用の時刻でソートして「夜の時系列」にする
-    night_data.sort(key=lambda x: x[0])
+        # ② 翌日で、日の出まで → 採用
+        if d == sunrise_date and tm <= sunrise_time:
+            picked.append((dt, c))
+            continue
 
-    for _, dt_orig, c in night_data:
+        # それ以外は無視
+
+    # 時系列順に並べる（17→18→…→23→00→…→06）
+    picked.sort(key=lambda x: x[0])
+
+    lines = []
+    for dt, c in picked:
         bar_len = int(c / 100 * MAX_BAR)
         bar = "▮" * bar_len + " "
-        hour_zen = f"{dt_orig.hour:02d}".translate(to_zen)
+        hour_zen = f"{dt.hour:02d}".translate(to_zen)
         pct = f"{c:3d}%".translate(to_zen)
         lines.append(f"{hour_zen}時（{pct}）: {bar}")
 
@@ -254,7 +262,7 @@ def send_ntfy(text: str):
 
 
 # ==============================
-# 朝夕の送信判定
+# 朝夕の送信ウィンドウ
 # ==============================
 def which_window(now_jst: datetime, sunset_jst: datetime) -> str | None:
     # 朝 6:20〜7:40
@@ -263,7 +271,7 @@ def which_window(now_jst: datetime, sunset_jst: datetime) -> str | None:
     ):
         return "morning"
 
-    # 夕方：日没1時間前（30分丸め）±30分
+    # 夕方：日没1時間前を30分に丸めて±30分
     target = floor_to_30(sunset_jst - timedelta(hours=1))
     delta = abs((now_jst - target).total_seconds())
     if now_jst < sunset_jst and delta <= 30 * 60:
@@ -272,6 +280,9 @@ def which_window(now_jst: datetime, sunset_jst: datetime) -> str | None:
     return None
 
 
+# ==============================
+# 重複防止（ファイルで記録）※Actions側でcacheする想定
+# ==============================
 def already_sent_today(block_label: str) -> bool:
     return os.path.exists(LAST_FILE) and open(LAST_FILE).read().strip() == block_label
 
@@ -281,13 +292,16 @@ def mark_sent(block_label: str):
         f.write(block_label)
 
 
+# ==============================
+# main
+# ==============================
 def main():
     now_jst = datetime.now(JST)
     sunset_jst = fetch_sunset_jst()
     event_name = os.getenv("GITHUB_EVENT_NAME", "")
     is_manual = event_name == "workflow_dispatch"
 
-    # 手動runは重複防止に関係なく送る
+    # 手動実行のときは即送る（本番で不要ならこのブロックを削除）
     if DEBUG_FORCE_NOTIFY and is_manual:
         msg = build_message(sunset_jst)
         send_ntfy(msg)
@@ -300,10 +314,11 @@ def main():
         return
 
     if period == "morning":
+        # 朝は実行日でタグ
         block_label = f"{now_jst.date()}_morning"
     else:
+        # 夕方は「その日の日没の日付」でタグ
         target_block = floor_to_30(sunset_jst - timedelta(hours=1))
-        # 夕方は「日没の日付」でタグをつける
         block_label = f"{sunset_jst.date()}_evening_{target_block.strftime('%H%M')}"
 
     if already_sent_today(block_label):
